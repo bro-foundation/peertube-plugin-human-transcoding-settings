@@ -1,260 +1,177 @@
-import { PluginSettingsManager, PluginTranscodingManager } from "@peertube/peertube-types"
-import { EncoderOptions, EncoderOptionsBuilderParams, RegisterServerOptions, VideoResolution } from "@peertube/peertube-types"
-import { Logger } from 'winston'
+import {
+  PluginSettingsKeys,
+  PluginSettings,
+  PeerTubePlugin,
+  RegisterSettingOptions
+} from '@peertube/peertube-types';
 
-let logger : Logger
-let transcodingManager : PluginTranscodingManager
+const resolutions = [
+  '144p',
+  '240p',
+  '360p',
+  '480p',
+  '720p',
+  '1080p',
+  '1440p',
+  '2160p' // 4K
+];
 
-const DEFAULT_HARDWARE_DECODE : boolean = false
-const DEFAULT_QUALITY : number = -1
-const DEFAULT_BITRATES : Map<VideoResolution, number> = new Map([
-    [VideoResolution.H_NOVIDEO, 64 * 1000],
-    [VideoResolution.H_144P, 320 * 1000],
-    [VideoResolution.H_360P, 780 * 1000],
-    [VideoResolution.H_480P, 1500 * 1000],
-    [VideoResolution.H_720P, 2800 * 1000],
-    [VideoResolution.H_1080P, 5200 * 1000],
-    [VideoResolution.H_1440P, 10_000 * 1000],
-    [VideoResolution.H_4K, 22_000 * 1000]
-])
+export async function register(
+  this: PeerTubePlugin,
+  settings: PluginSettings
+) {
+  this.logger.info('Registering custom transcoder plugin...');
 
-interface PluginSettings {
-    hardwareDecode : boolean
-    quality: number
-    baseBitrate: Map<VideoResolution, number>
-}
-let pluginSettings : PluginSettings = {
-    hardwareDecode: DEFAULT_HARDWARE_DECODE,
-    quality: DEFAULT_QUALITY,
-    baseBitrate: new Map(DEFAULT_BITRATES)
-}
+  const registeredSettings: RegisterSettingOptions[] = [];
 
-let latestStreamNum = 9999
+  // Global Audio settings
+  registeredSettings.push({
+    name: 'audio_codec',
+    label: 'Аудіо кодек',
+    type: 'string',
+    default: 'aac',
+    description: 'Введіть назву аудіокодека FFmpeg (наприклад, aac, libopus).'
+  });
 
-export async function register({settingsManager, peertubeHelpers, transcodingManager: transcode, registerSetting} :RegisterServerOptions) {
-    logger = peertubeHelpers.logger
-    transcodingManager = transcode
+  registeredSettings.push({
+    name: 'audio_params',
+    label: 'Додаткові параметри FFmpeg для аудіокодека',
+    type: 'string',
+    default: '-b:a 128k',
+    description:
+      'Додаткові параметри FFmpeg для аудіокодека (наприклад, -b:a 128k).'
+  });
 
-    logger.info("Registering peertube-plugin-hardware-encode");
+  registeredSettings.push({
+    name: 'transcode_threads',
+    label: 'Кількість потоків транскодування (0 = авто)',
+    type: 'number',
+    default: 0,
+    description:
+      'Кількість потоків, які FFmpeg використовуватиме для транскодування. 0 означає автоматичне визначення.'
+  });
 
-    const encoder = 'h264_vaapi'
-    const profileName = 'vaapi'
+  // Loop through each resolution to create dynamic settings
+  for (const res of resolutions) {
+    // Enable/Disable resolution
+    registeredSettings.push({
+      name: `resolution_${res}_enabled`,
+      label: `Увімкнути ${res} транскодування`,
+      type: 'boolean',
+      default: true,
+      description: `Чи включати ${res} роздільну здатність у налаштування транскодування.`
+    });
 
-    // Add trasncoding profiles
-    transcodingManager.addVODProfile(encoder, profileName, vodBuilder)
-    transcodingManager.addVODEncoderPriority('video', encoder, 1000)
+    // Codec input for the resolution
+    registeredSettings.push({
+      name: `resolution_${res}_codec`,
+      label: `Відеокодек для ${res}`,
+      type: 'string',
+      default: 'libx264',
+      description: `Введіть назву відеокодека FFmpeg для ${res} (наприклад, libx264, libvpx-vp9, h264_qsv, h264_rkmpp).`
+    });
 
-    transcodingManager.addLiveProfile(encoder, profileName, liveBuilder)
-    transcodingManager.addLiveEncoderPriority('video', encoder, 1000)
+    // Input parameters for video (e.g., for hardware acceleration)
+    registeredSettings.push({
+      name: `resolution_${res}_input_params`,
+      label: `Параметри FFmpeg перед відеокодером для ${res}`,
+      type: 'string',
+      default: '',
+      description: `Параметри, які додаються перед відеокодеком (наприклад, -hwaccel auto -hwaccel_device /dev/dri/renderD128).`
+    });
 
-    // Load existing settings and default to constants if not present
-    await loadSettings(settingsManager)
+    // Custom parameters for the selected codec
+    registeredSettings.push({
+      name: `resolution_${res}_codec_params`,
+      label: `Додаткові параметри FFmpeg для ${res} відеокодека`,
+      type: 'string',
+      default: '-crf 23 -preset veryfast',
+      description: `Додаткові параметри FFmpeg для відеокодека (${res}). Приклад: -crf 23 -preset veryfast. Для апаратного прискорювача: -qp 20`
+    });
 
-    registerSetting({
-        name: 'hardware-decode',
-        label: 'Hardware decode',
+    // Output parameters/filters for video (e.g., scale filters for hardware)
+    registeredSettings.push({
+      name: `resolution_${res}_output_filters`,
+      label: `Фільтри FFmpeg після відеокодека для ${res}`,
+      type: 'string',
+      default: '',
+      description: `Фільтри FFmpeg, які додаються після відеокодека (наприклад, -vf "scale=w=%w:h=%h" або -vf "scale_rpi=w=%w:h=%h:mode=0"). %w і %h будуть замінені на ширину і висоту.`
+    });
+  }
 
-        type: 'input-checkbox',
+  await this.settings.register(registeredSettings);
 
-        descriptionHTML: 'Use hardware video decoder instead of software decoder. This will slightly improve performance but may cause some issues with some videos. If you encounter issues, disable this option and restart failed jobs.',
+  // Hook into PeerTube's transcoding pipeline
+  this.peertubeHelpers.transcoding.onFFmpegTranscoding(
+    'on-video-transcoding',
+    async (options) => {
+      this.logger.info(`Processing video transcoding for ${options.input}`);
 
-        default: DEFAULT_HARDWARE_DECODE,
-        private: false
-    })
-    registerSetting({
-        name: 'quality',
-        label: 'Quality',
+      const config: {
+        audio_codec: string;
+        audio_params: string;
+        transcode_threads: number;
+      } = await settings.getAll(); // Get global settings
 
-        type: 'select',
-        options: [
-            { label: 'Automatic', value: '-1' },
-            { label: '1', value: '1' },
-            { label: '2', value: '2' },
-            { label: '3', value: '3' },
-            { label: '4', value: '4' },
-            { label: '5', value: '5' },
-            { label: '6', value: '6' },
-            { label: '7', value: '7' }
-        ],
+      const newProfiles = options.profiles.map((profile) => {
+        const resolutionId = profile.resolution.id + 'p'; // e.g., '144p'
+        const resolutionWidth = profile.resolution.width;
+        const resolutionHeight = profile.resolution.height;
 
-        descriptionHTML: 'This parameter controls the speed / quality tradeoff. Lower values mean better quality but slower encoding. Higher values mean faster encoding but lower quality. This setting is hardware dependent, you may need to experiment to find the best value for your hardware. Some hardware may have less than 7 levels of compression.',
+        // Retrieve settings for the current resolution
+        const isEnabled = settings.get(`resolution_${resolutionId}_enabled`) as boolean;
+        const videoCodec = settings.get(`resolution_${resolutionId}_codec`) as string;
+        const inputParams = settings.get(`resolution_${resolutionId}_input_params`) as string;
+        const codecParams = settings.get(`resolution_${resolutionId}_codec_params`) as string;
+        let outputFilters = settings.get(`resolution_${resolutionId}_output_filters`) as string;
 
-        default: DEFAULT_QUALITY.toString(),
-        private: false
-    })
+        if (!isEnabled) {
+          this.logger.info(`Resolution ${resolutionId} disabled, skipping.`);
+          return null; // Skip this profile
+        }
 
-    registerSetting({
-        name: 'base-bitrate-description',
-        label: 'Base bitrate',
+        // Replace placeholders in output filters
+        if (outputFilters) {
+          outputFilters = outputFilters.replace(/%w/g, resolutionWidth.toString()).replace(/%h/g, resolutionHeight.toString());
+        }
 
-        type: 'html',
-        html: '',
-        descriptionHTML: `The base bitrate for video in bits. We take the min bitrate between the bitrate setting and video bitrate.<br/>This is the bitrate used when the video is transcoded at 30 FPS. The bitrate will be scaled linearly between this value and the maximum bitrate when the video is transcoded at 60 FPS. Wrong values are replaced by default values.`,
-           
-        private: true,
-    })
-    for (const [resolution, bitrate] of pluginSettings.baseBitrate) {
-        logger.info("registering bitrate setting: "+ bitrate.toString())
-        registerSetting({
-            name: `base-bitrate-${resolution}`,
-            label: `Base bitrate for ${printResolution(resolution)}`,
+        // Construct FFmpeg arguments
+        let finalArguments = '';
 
-            type: 'input',
+        if (config.transcode_threads > 0) {
+          finalArguments += `-threads ${config.transcode_threads} `;
+        }
 
-            default: DEFAULT_BITRATES.get(resolution)?.toString(),
-            descriptionHTML: `Default value: ${DEFAULT_BITRATES.get(resolution)}`,
+        finalArguments += `${inputParams} -c:v ${videoCodec} ${codecParams} ${outputFilters} -c:a ${config.audio_codec} ${config.audio_params}`;
 
-            private: false
-        })
+        this.logger.info(
+          `Generated arguments for ${resolutionId}: ${finalArguments}`
+        );
+
+        return {
+          ...profile,
+          ffmpegProfile: {
+            ...profile.ffmpegProfile,
+            arguments: finalArguments.trim() // Trim to remove leading/trailing spaces
+          }
+        };
+      }).filter(Boolean); // Filter out null profiles (disabled resolutions)
+
+      // Ensure that PeerTube expects an array of profiles, not nulls
+      return {
+        ...options,
+        profiles: newProfiles
+      };
     }
+  );
 
-    settingsManager.onSettingsChange(async (settings) => {
-        loadSettings(settingsManager)
-    })
-}
-
-export async function unregister() {
-    logger.info("Unregistering peertube-plugin-hardware-encode")
-    transcodingManager.removeAllProfilesAndEncoderPriorities()
-    return true
-}
-
-async function loadSettings(settingsManager: PluginSettingsManager) {
-    pluginSettings.hardwareDecode = await settingsManager.getSetting('hardware-decode') == "true"
-    pluginSettings.quality = parseInt(await settingsManager.getSetting('quality') as string) || DEFAULT_QUALITY
-
-    for (const [resolution, bitrate] of DEFAULT_BITRATES) {
-        const key = `base-bitrate-${resolution}`
-        const storedValue = await settingsManager.getSetting(key) as string
-        pluginSettings.baseBitrate.set(resolution, parseInt(storedValue) || bitrate)
-        logger.info(`Bitrate ${printResolution(resolution)}: ${pluginSettings.baseBitrate.get(resolution)}`)
-    }
-
-    logger.info(`Hardware decode: ${pluginSettings.hardwareDecode}`)
-    logger.info(`Quality: ${pluginSettings.quality}`)
-}
-
-function printResolution(resolution : VideoResolution) : string {
-    switch (resolution) {
-        case VideoResolution.H_NOVIDEO: return 'audio only'
-        case VideoResolution.H_144P:
-        case VideoResolution.H_360P:
-        case VideoResolution.H_480P:
-        case VideoResolution.H_720P:
-        case VideoResolution.H_1080P:
-        case VideoResolution.H_1440P:
-            return `${resolution}p`
-        case VideoResolution.H_4K: return '4K'
-
-        default: return 'Unknown'
-    }
-}
-
-function buildInitOptions() {
-    if (pluginSettings.hardwareDecode) {
-        return [
-            '-hwaccel vaapi',
-            '-vaapi_device /dev/dri/renderD128',
-            '-hwaccel_output_format vaapi',
-        ]
-    } else {
-        return [
-            '-vaapi_device /dev/dri/renderD128'
-        ]
-    }
-}
-
-async function vodBuilder(params: EncoderOptionsBuilderParams) : Promise<EncoderOptions> {
-    const { resolution, fps, streamNum, inputBitrate } = params
-    const streamSuffix = streamNum == undefined ? '' : `:${streamNum}`
-    let targetBitrate = getTargetBitrate(resolution, fps)
-    let shouldInitVaapi = (streamNum == undefined || streamNum <= latestStreamNum)
-
-    if (targetBitrate > inputBitrate) {
-        targetBitrate = inputBitrate
-    }
-
-    logger.info(`Building encoder options, received ${JSON.stringify(params)}`)
-    
-    if (shouldInitVaapi && streamNum != undefined) {
-        latestStreamNum = streamNum
-    }
-    // You can also return a promise
-    let options : EncoderOptions = {
-        scaleFilter: {
-            // software decode requires specifying pixel format for hardware filter and upload it to GPU
-            name: pluginSettings.hardwareDecode ? 'scale_vaapi' : 'format=nv12,hwupload,scale_vaapi'
-        },
-        inputOptions: shouldInitVaapi ? buildInitOptions() : [],
-        outputOptions: [
-            `-quality ${pluginSettings.quality}`,
-            `-b:v${streamSuffix} ${targetBitrate}`,
-            `-bufsize ${targetBitrate * 2}`
-        ]
-    }
-    logger.info(`EncoderOptions: ${JSON.stringify(options)}`)
-    return options 
+  this.logger.info('Custom transcoder plugin registered.');
 }
 
-
-async function liveBuilder(params: EncoderOptionsBuilderParams) : Promise<EncoderOptions> {
-    const { resolution, fps, streamNum, inputBitrate } = params
-    const streamSuffix = streamNum == undefined ? '' : `:${streamNum}`
-    let targetBitrate = getTargetBitrate(resolution, fps)
-    let shouldInitVaapi = (streamNum == undefined || streamNum <= latestStreamNum)
-
-    if (targetBitrate > inputBitrate) {
-        targetBitrate = inputBitrate
-    }
-
-    logger.info(`Building encoder options, received ${JSON.stringify(params)}`)
-
-    if (shouldInitVaapi && streamNum != undefined) {
-      latestStreamNum = streamNum
-    }
-
-    // You can also return a promise
-    const options = {
-      scaleFilter: {
-        name: pluginSettings.hardwareDecode ? 'scale_vaapi' : 'format=nv12,hwupload,scale_vaapi'
-      },
-      inputOptions: shouldInitVaapi ? buildInitOptions() : [],
-      outputOptions: [
-        `-quality ${pluginSettings.quality}`,
-        `-r:v${streamSuffix} ${fps}`,
-        `-profile:v${streamSuffix} high`,
-        `-level:v${streamSuffix} 3.1`,
-        `-g:v${streamSuffix} ${fps*2}`,
-        `-b:v${streamSuffix} ${targetBitrate}`,
-        `-bufsize ${targetBitrate * 2}`
-      ]
-    }
-    logger.info(`EncoderOptions: ${JSON.stringify(options)}`)
-    return options
-}
-
-/**
- * Calculate the target bitrate based on video resolution and FPS.
- *
- * The calculation is based on two values:
- * Bitrate at VideoTranscodingFPS.AVERAGE is always the same as
- * getBaseBitrate(). Bitrate at VideoTranscodingFPS.MAX is always
- * getBaseBitrate() * 1.4. All other values are calculated linearly
- * between these two points.
- */
-function getTargetBitrate (resolution : VideoResolution, fps : number) : number {
-    const baseBitrate = pluginSettings.baseBitrate.get(resolution) || 0
-    // The maximum bitrate, used when fps === VideoTranscodingFPS.MAX
-    // Based on numbers from Youtube, 60 fps bitrate divided by 30 fps bitrate:
-    //  720p: 2600 / 1750 = 1.49
-    // 1080p: 4400 / 3300 = 1.33
-    const maxBitrate = baseBitrate * 1.4
-    const maxBitrateDifference = maxBitrate - baseBitrate
-    const maxFpsDifference = 60 - 30
-    // For 1080p video with default settings, this results in the following formula:
-    // 3300 + (x - 30) * (1320/30)
-    // Example outputs:
-    // 1080p10: 2420 kbps, 1080p30: 3300 kbps, 1080p60: 4620 kbps
-    //  720p10: 1283 kbps,  720p30: 1750 kbps,  720p60: 2450 kbps
-    return Math.floor(baseBitrate + (fps - 30) * (maxBitrateDifference / maxFpsDifference))
+export async function unregister(this: PeerTubePlugin) {
+  this.logger.info('Unregistering custom transcoder plugin...');
+  this.peertubeHelpers.transcoding.removeFFmpegTranscodingHook(
+    'on-video-transcoding'
+  );
+  this.logger.info('Custom transcoder plugin unregistered.');
 }

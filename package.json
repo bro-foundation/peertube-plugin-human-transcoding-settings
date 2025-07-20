@@ -1,18 +1,35 @@
 {
-    "name": "peertube-plugin-hardware-transcode-vaapi",
-    "version": "0.2.9",
+    "name": "peertube-plugin-human-transcoding-settings",
+    "version": "0.0.1",
     "license": "MIT",
-    "description": "Plugin that adds transcode profiles which use vaapi for hardware acceleration",
+    "description": "Plugin that adds transcode profiles which use human settings",
     "engine": {
         "peertube": ">=5.1.0"
     },
     "keywords": [
         "peertube",
-        "plugin"
+        "plugin",
+        "video",
+        "audio",
+        "hw",
+        "hardware",
+        "vp8",
+        "vp9",
+        "h264",
+        "h265",
+        "av1",
+        "opus",
+        "aac",
+        "transcoding",
+        "encodind",
+        "decoding",
+        "customization",
+        "options",
+        "settings"
     ],
-    "homepage": "https://github.com/TheoLeCalvar/peertube-plugin-hardware-transcode-vaapi",
+    "homepage": "https://github.com/bro-foundation/peertube-plugin-human-transcoding-settings",
     "author": "gdsn",
-    "bugs": "https://github.com/TheoLeCalvar/peertube-plugin-hardware-transcode-vaapi",
+    "bugs": "https://github.com/bro-foundation/peertube-plugin-human-transcoding-settings",
     "library": "./dist/main.js",
     "files": [
         "/dist"
